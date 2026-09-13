@@ -1,0 +1,51 @@
+name: NFL Weekly Backtest & Calibration
+
+on:
+  schedule:
+    # Mondays at 6 AM UTC, per spec - after the prior week's games have
+    # completed, so the new week's results are available to backtest.
+    - cron: "0 6 * * 1"
+  workflow_dispatch: {}
+
+permissions:
+  contents: write
+
+jobs:
+  backtest:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install "setuptools<81"
+          pip install -r requirements.txt
+          pip install nfl_data_py==0.3.3 --no-deps
+          # Additional deps needed only by the backtest script, not the
+          # main dashboard script - kept separate from requirements.txt
+          # so the main workflow doesn't pay for scikit-learn/matplotlib
+          # it never uses.
+          pip install scikit-learn matplotlib
+
+      - name: Run backtest
+        run: python backtest_nfl.py
+        # NOTE: this runs the FULL 2021-2025 backtest (BACKTEST_SEASONS in
+        # backtest_nfl.py) - loading 5 seasons of play-by-play is a real
+        # amount of data and this step will take a while. That's expected,
+        # not a hang - if it's still running after a very long time with
+        # no new log lines, THAT would indicate a real problem.
+
+      - name: Commit updated calibration report
+        run: |
+          git config --local user.email "action@github.com"
+          git config --local user.name "GitHub Action"
+          git add docs/calibration.html docs/calibration_curve.png
+          git diff --staged --quiet && echo "No calibration changes to commit" || git commit -m "Update weekly calibration report [automated]"
+          git push

@@ -1,0 +1,18 @@
+# Verified working together during build/testing (2026-09-10).
+# nfl_data_py declares pandas<2.0/numpy<2.0 in its own metadata, but that
+# pin is stale - it was confirmed at build time to work fine against
+# modern pandas/numpy for import_pbp_data / import_seasonal_rosters, and
+# forcing the old pandas<2.0 pin would require building pandas from
+# source (no prebuilt wheel for old pandas on current Python), which is
+# slow and fragile in CI.
+#
+# INSTALL NOTE: install this file normally (pip install -r requirements.txt),
+# WITHOUT --no-deps - pandas/numpy/fastparquet all need their own real
+# dependencies (python-dateutil, etc.) installed. Only nfl_data_py itself
+# needs a separate --no-deps install, done as a second step in the
+# workflow, to stop pip from trying to downgrade pandas/numpy to satisfy
+# nfl_data_py's stale internal pin.
+pandas>=2.0
+numpy>=1.26
+appdirs>=1.4.4
+fastparquet>=2024.2.0
