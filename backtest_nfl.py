@@ -363,21 +363,28 @@ def run_topdown_vs_bottomup_matrix(team_games, bu_predictions, td_predictions, t
     print("=" * 78)
     print("TOP-DOWN vs BOTTOM-UP vs ENSEMBLE: 2x2 THRESHOLD MATRIX")
     print("=" * 78)
-    print(f"{'Model':<12}{'Threshold':<18}{'Brier':>10}{'SE':>10}{'n':>8}")
+    print(f"{'Model':<12}{'Threshold':<18}{'Brier':>10}{'SE':>10}{'n':>8}{'NaiveBase':>12}")
     print("-" * 78)
     results = {}
+    naive_results = {}
     for model_name in ("topdown", "bottomup", "ensemble"):
         for threshold_name in ("league", "team"):
             p = rows[model_name][threshold_name]["p"]
             y = rows[model_name][threshold_name]["y"]
             brier, se, n = brier_with_se(y, p)
+            base_rate = float(np.mean(y)) if len(y) > 0 else float("nan")
+            naive_brier = base_rate * (1 - base_rate)
             results[(model_name, threshold_name)] = (brier, se, n)
+            naive_results[(model_name, threshold_name)] = naive_brier
             label = "league-average" if threshold_name == "league" else "per-team"
-            print(f"{model_name:<12}{label:<18}{round(brier,4):>10}{round(se,4):>10}{n:>8}")
+            print(f"{model_name:<12}{label:<18}{round(brier,4):>10}{round(se,4):>10}{n:>8}{round(naive_brier,4):>12}")
     print("=" * 78)
 
     td_team = results[("topdown", "team")]
     bu_team = results[("bottomup", "team")]
+    td_team_naive = naive_results[("topdown", "team")]
+    print(f"Top-down (per-team) vs its own naive baseline: model={round(td_team[0],4)}, "
+          f"naive={round(td_team_naive,4)}, skill={round(td_team_naive - td_team[0],4)}")
     gap = abs(td_team[0] - bu_team[0])
     combined_se = math.sqrt(td_team[1]**2 + bu_team[1]**2)
     print(f"Top-down vs bottom-up gap (per-team threshold): {round(gap,4)}, combined SE: {round(combined_se,4)}")
@@ -982,8 +989,13 @@ if __name__ == "__main__":
 
         brier = brier_score_loss(y_true, y_prob)
         logloss = log_loss(y_true, np.clip(y_prob, 1e-6, 1 - 1e-6))
+        base_rate = float(np.mean(y_true))
+        naive_brier = base_rate * (1 - base_rate)
+        skill = naive_brier - brier
         print(f"Brier score: {round(brier, 4)}")
         print(f"Log loss: {round(logloss, 4)}")
+        print(f"Model Brier: {round(brier,4)} | Naive baseline (base rate = {round(base_rate,3)}): "
+              f"{round(naive_brier,4)} | Skill: {'+' if skill>=0 else ''}{round(skill,4)}")
 
         buckets = compute_calibration_buckets(predictions)
         print()
@@ -1082,6 +1094,8 @@ if __name__ == "__main__":
     team_predictions_no_injury = score_team_total_predictions(team_predictions_no_injury, std_dev=team_total_std)
     tp_no_inj_df = pd.DataFrame(team_predictions_no_injury)
     brier_no_inj, se_no_inj, n_no_inj = brier_with_se(tp_no_inj_df["hit"].values, tp_no_inj_df["predicted_prob"].values)
+    base_rate_no_inj = float(tp_no_inj_df["hit"].mean())
+    naive_brier_no_inj = base_rate_no_inj * (1 - base_rate_no_inj)
 
     if injury_mults and qb_out_signal:
         team_predictions_with_injury = replay_team_totals(team_games, use_injury_adjustment=True,
@@ -1089,12 +1103,15 @@ if __name__ == "__main__":
         team_predictions_with_injury = score_team_total_predictions(team_predictions_with_injury, std_dev=team_total_std)
         tp_with_inj_df = pd.DataFrame(team_predictions_with_injury)
         brier_with_inj, se_with_inj, n_with_inj = brier_with_se(tp_with_inj_df["hit"].values, tp_with_inj_df["predicted_prob"].values)
+        base_rate_with_inj = float(tp_with_inj_df["hit"].mean())
+        naive_brier_with_inj = base_rate_with_inj * (1 - base_rate_with_inj)
         team_predictions = team_predictions_with_injury
         team_brier = brier_with_inj
     else:
         team_predictions = team_predictions_no_injury
         team_brier = brier_no_inj
         brier_with_inj = None
+        naive_brier_with_inj = None
 
     team_logloss = log_loss(pd.DataFrame(team_predictions)["hit"].values,
                              np.clip(pd.DataFrame(team_predictions)["predicted_prob"].values, 1e-6, 1 - 1e-6))
@@ -1102,11 +1119,11 @@ if __name__ == "__main__":
     print("=" * 78)
     print("INJURY ADJUSTMENT COMPARISON")
     print("=" * 78)
-    print(f"{'Condition':<24}{'Brier':>10}{'SE':>10}{'n':>8}")
+    print(f"{'Condition':<24}{'Brier':>10}{'SE':>10}{'n':>8}{'NaiveBase':>12}")
     print("-" * 78)
-    print(f"{'without injury adj':<24}{round(brier_no_inj,4):>10}{round(se_no_inj,4):>10}{n_no_inj:>8}")
+    print(f"{'without injury adj':<24}{round(brier_no_inj,4):>10}{round(se_no_inj,4):>10}{n_no_inj:>8}{round(naive_brier_no_inj,4):>12}")
     if brier_with_inj is not None:
-        print(f"{'with injury adj':<24}{round(brier_with_inj,4):>10}{round(se_with_inj,4):>10}{n_with_inj:>8}")
+        print(f"{'with injury adj':<24}{round(brier_with_inj,4):>10}{round(se_with_inj,4):>10}{n_with_inj:>8}{round(naive_brier_with_inj,4):>12}")
         gap = abs(brier_with_inj - brier_no_inj)
         combined_se = math.sqrt(se_with_inj**2 + se_no_inj**2)
         print(f"Gap: {round(gap,4)}, combined SE: {round(combined_se,4)}")
