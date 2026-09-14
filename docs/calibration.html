@@ -1,0 +1,53 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>NFL Model Calibration</title>
+<style>
+body { background:#0b0f19; color:#e8ecf4; font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif; margin:0; padding:20px; }
+h1 { font-size:1.3em; }
+.summary { background:#131a2b; border-radius:12px; padding:16px; margin:16px 0; }
+.summary p { margin:4px 0; font-size:0.9em; }
+.caveat { background:#2b1d0e; border:1px solid #a56a1f; border-radius:12px; padding:16px; margin:16px 0; }
+.caveat p { margin:4px 0; font-size:0.85em; color:#f0c987; }
+.caveat strong { color:#ffdca0; }
+table { width:100%; border-collapse:collapse; margin-top:16px; font-size:0.82em; }
+th, td { padding:7px; text-align:left; border-bottom:1px solid rgba(255,255,255,0.1); }
+th { color:#8892a6; text-transform:uppercase; font-size:0.68em; letter-spacing:0.03em; }
+th.early, td.early { border-left:1px solid rgba(255,255,255,0.15); }
+img { max-width:100%; border-radius:12px; margin-top:16px; }
+</style>
+</head>
+<body>
+<h1>NFL Model Calibration Report</h1>
+<p style="color:#8892a6; font-size:0.8em;">Generated 2026-09-14 20:39 UTC</p>
+
+<div class="caveat">
+  <p><strong>Sample-size note:</strong> Backtest predictions at week N use games from
+  multiple seasons. The live system only uses the current season. Early-season
+  calibration will be worse than the chart below shows. Treat weeks 1-6 with caution.</p>
+  <p>The "Early-Season" columns restrict to predictions made with
+  &le;5 prior games - closer to what the live
+  system has access to early in a real season.</p>
+</div>
+
+<div class="summary">
+  <p><strong>Brier score:</strong> 0.2157 (lower is better; 0 = perfect, 0.25 = no skill on a 50/50 task)</p>
+  <p><strong>Log loss:</strong> 0.621 (lower is better)</p>
+  <p><strong>Total predictions:</strong> 14095</p>
+  <p><strong>Worst-calibrated bucket (full sample):</strong> 90-100%
+     (-20.0% off, n=4)</p>
+  <p><strong>Worst-calibrated bucket (early-season only):</strong> 20-30%
+     (-25.0% off, n=15)</p>
+</div>
+<img src="calibration_curve.png" alt="Calibration reliability diagram">
+<table>
+  <thead><tr>
+    <th>Predicted Bucket</th><th>N</th><th>Actual Hit Rate</th><th>Predicted Midpoint</th><th>Delta</th>
+    <th class="early">Early-Season N</th><th class="early">Early-Season Actual</th><th class="early">Early-Season Delta</th>
+  </tr></thead>
+  <tbody><tr><td>10-20%</td><td>2</td><td>0.0%</td><td>15.0%</td><td>-15.0%</td><td>—</td><td>—</td><td>—</td></tr><tr><td>20-30%</td><td>181</td><td>13.3%</td><td>25.0%</td><td>-11.7%</td><td>15</td><td>0.0%</td><td>-25.0%</td></tr><tr><td>30-40%</td><td>1275</td><td>33.0%</td><td>35.0%</td><td>-2.0%</td><td>222</td><td>23.0%</td><td>-12.0%</td></tr><tr><td>40-50%</td><td>2967</td><td>43.1%</td><td>45.0%</td><td>-1.9%</td><td>368</td><td>44.3%</td><td>-0.7%</td></tr><tr><td>50-60%</td><td>3720</td><td>56.6%</td><td>55.0%</td><td>+1.6%</td><td>538</td><td>65.4%</td><td>+10.4%</td></tr><tr><td>60-70%</td><td>3321</td><td>69.6%</td><td>65.0%</td><td>+4.6%</td><td>297</td><td>65.3%</td><td>+0.3%</td></tr><tr><td>70-80%</td><td>2195</td><td>80.5%</td><td>75.0%</td><td>+5.5%</td><td>178</td><td>71.3%</td><td>-3.7%</td></tr><tr><td>80-90%</td><td>430</td><td>87.4%</td><td>85.0%</td><td>+2.4%</td><td>47</td><td>74.5%</td><td>-10.5%</td></tr><tr><td>90-100%</td><td>4</td><td>75.0%</td><td>95.0%</td><td>-20.0%</td><td>—</td><td>—</td><td>—</td></tr></tbody>
+</table>
+</body>
+</html>

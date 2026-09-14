@@ -41,6 +41,7 @@ from predict_nfl import (
     bayesian_shrinkage,
     compute_league_avg_hit_rate,
     prop_floor_probs_yards,
+    prop_floor_probs_wr_rb,
     SHRINKAGE_K,
     EPA_Z_SCALE,
     EPA_ENABLED,
@@ -109,6 +110,134 @@ def build_walkforward_qb_gamelog(pbp_df):
     return grouped
 
 
+def build_walkforward_wr_rb_gamelog(pbp_df, stat_key):
+    """
+    Same pattern as build_walkforward_qb_gamelog, for a single WR/RB
+    stat ("receiving_yards" or "rushing_yards"). Returns a long table of
+    (player_id, season, week, game_id, posteam, defteam, <stat_key>),
+    sorted chronologically, for the walk-forward replay.
+    """
+    df = pbp_df[pbp_df.get("season_type") == "REG"].copy() if "season_type" in pbp_df.columns else pbp_df.copy()
+
+    if stat_key == "receiving_yards":
+        plays = df[df.get("complete_pass") == 1].dropna(subset=["receiver_id"]).copy() \
+            if "complete_pass" in df.columns else pd.DataFrame()
+        id_col, name_col = "receiver_id", "receiver"
+    elif stat_key == "rushing_yards":
+        plays = df[df["rush_attempt"] == 1].dropna(subset=["rusher_id"]).copy() if "rush_attempt" in df.columns else pd.DataFrame()
+        id_col, name_col = "rusher_id", "rusher"
+    else:
+        raise ValueError(f"stat_key must be 'receiving_yards' or 'rushing_yards', got {stat_key!r}")
+
+    if plays.empty or stat_key not in plays.columns:
+        return pd.DataFrame(columns=["player_id", "season", "week", "game_id", "posteam", "defteam", stat_key])
+
+    plays[stat_key] = plays[stat_key].fillna(0.0)
+    grouped = plays.groupby([id_col, "season", "week", "game_id", "posteam", "defteam"]).agg(
+        **{stat_key: (stat_key, "sum")}
+    ).reset_index()
+    grouped = grouped.rename(columns={id_col: "player_id"})
+    grouped = grouped.sort_values(["season", "week"]).reset_index(drop=True)
+    return grouped
+
+
+def replay_wr_rb_props(gamelog, stat_key, defense_allowed_history, defense_field,
+                        min_games_before_predicting=3, qb_games_sample=10):
+    """
+    Walk-forward replay for WR/RB props, mirroring replay_all_games'
+    discipline (only prior games used, league-average recomputed as
+    history accumulates) but WITHOUT the attempts-rescaling or EPA
+    branches - matching what the live system's get_wr_rb_props /
+    finalize_wr_rb_floors actually do (opponent adjustment via a single
+    pct-diff formula against receiving/rushing yards allowed, no z-score
+    EPA path for these stats).
+    """
+    predictions = []
+    history_by_player = {}
+    defense_indexed = defense_allowed_history.set_index(["defteam", "season", "week"]) \
+        if not defense_allowed_history.empty else None
+    league_avg_by_week = (
+        defense_allowed_history.dropna(subset=[defense_field])
+        .groupby(["season", "week"])[defense_field]
+        .mean()
+        .to_dict()
+        if not defense_allowed_history.empty else {}
+    )
+
+    rows = gamelog.to_dict("records")
+    league_avg_cache = {}
+
+    for row in rows:
+        pid = row["player_id"]
+        season, week = row["season"], row["week"]
+
+        prior_games = history_by_player.get(pid, [])
+        if len(prior_games) < min_games_before_predicting:
+            history_by_player.setdefault(pid, []).append(row)
+            continue
+
+        recent = prior_games[-qb_games_sample:]
+        raw_floors = prop_floor_probs_wr_rb(recent, stat_key)
+        if not raw_floors:
+            history_by_player.setdefault(pid, []).append(row)
+            continue
+
+        cache_key = (season, week)
+        if cache_key not in league_avg_cache:
+            snapshot_candidates = []
+            for other_pid, other_games in history_by_player.items():
+                if len(other_games) < min_games_before_predicting:
+                    continue
+                other_recent = other_games[-qb_games_sample:]
+                other_floors = prop_floor_probs_wr_rb(other_recent, stat_key)
+                if other_floors:
+                    snapshot_candidates.append({
+                        "floors": {stat_key: other_floors},
+                        "games_sampled": len(other_recent),
+                    })
+            league_avg_cache[cache_key] = compute_league_avg_hit_rate(snapshot_candidates, stat_key=stat_key)
+        league_avg = league_avg_cache[cache_key]
+
+        defteam = row["defteam"]
+        opp_allowed = None
+        league_allowed_avg = league_avg_by_week.get((season, week))
+        if defense_indexed is not None:
+            try:
+                opp_allowed = defense_indexed.loc[(defteam, season, week), defense_field]
+                if pd.isna(opp_allowed):
+                    opp_allowed = None
+            except KeyError:
+                opp_allowed = None
+
+        for threshold, raw_hr in raw_floors.items():
+            hits = round(raw_hr * len(recent))
+            shrunk = bayesian_shrinkage(hits, len(recent), league_avg, k=SHRINKAGE_K)
+            predicted_prob = shrunk
+            if opp_allowed is not None and league_allowed_avg:
+                pct_diff = (opp_allowed - league_allowed_avg) / league_allowed_avg
+                adj_factor = max(-0.15, min(0.15, 0.4 * pct_diff))
+                predicted_prob = max(0.0, min(1.0, shrunk * (1 + adj_factor)))
+
+            actual_yards = row[stat_key]
+            predictions.append({
+                "game_id": row["game_id"],
+                "player_id": pid,
+                "season": season,
+                "week": week,
+                "threshold": threshold,
+                "predicted_prob": round(predicted_prob, 4),
+                "actual_yards": actual_yards,
+                "hit": 1 if actual_yards >= threshold else 0,
+                "games_of_history": len(prior_games),
+            })
+
+        history_by_player.setdefault(pid, []).append(row)
+
+    print(f"Replay complete ({stat_key}): {len(predictions)} threshold-level predictions "
+          f"across {len(set(p['game_id'] for p in predictions))} games.")
+    return predictions
+
+
 def build_walkforward_defense_epa(pbp_df):
     """
     Same idea as build_defense_pass_epa in the main script, but keyed by
@@ -164,6 +293,43 @@ def build_walkforward_defense_yards_allowed(pbp_df):
     per_game = per_game.sort_values(["defteam", "season", "week"])
 
     per_game["cum_avg_yds_allowed"] = (
+        per_game.groupby(["defteam", "season"])["yds_allowed"]
+        .apply(lambda s: s.shift(1).expanding().mean())
+        .reset_index(level=[0, 1], drop=True)
+    )
+    return per_game
+
+
+def build_walkforward_defense_rec_rush_allowed(pbp_df, stat_key):
+    """
+    Same walk-forward-safe pattern as build_walkforward_defense_yards_allowed,
+    for receiving_yards or rushing_yards allowed. Returns a DataFrame
+    with columns [defteam, season, week, game_id, yds_allowed, <field>]
+    where <field> is "rec_yds_allowed_pg" or "rush_yds_allowed_pg" - the
+    same field names get_wr_rb_props/finalize_wr_rb_floors expect.
+    """
+    df = pbp_df[pbp_df.get("season_type") == "REG"].copy() if "season_type" in pbp_df.columns else pbp_df.copy()
+
+    if stat_key == "receiving_yards":
+        plays = df[df.get("complete_pass") == 1].dropna(subset=["defteam"]).copy() \
+            if "complete_pass" in df.columns else pd.DataFrame()
+        field = "rec_yds_allowed_pg"
+    elif stat_key == "rushing_yards":
+        plays = df[df["rush_attempt"] == 1].dropna(subset=["defteam"]).copy() if "rush_attempt" in df.columns else pd.DataFrame()
+        field = "rush_yds_allowed_pg"
+    else:
+        raise ValueError(f"stat_key must be 'receiving_yards' or 'rushing_yards', got {stat_key!r}")
+
+    if plays.empty or stat_key not in plays.columns:
+        return pd.DataFrame(columns=["defteam", "season", "week", "game_id", "yds_allowed", field])
+
+    plays[stat_key] = plays[stat_key].fillna(0.0)
+    per_game = plays.groupby(["defteam", "season", "week", "game_id"]).agg(
+        yds_allowed=(stat_key, "sum"),
+    ).reset_index()
+    per_game = per_game.sort_values(["defteam", "season", "week"])
+
+    per_game[field] = (
         per_game.groupby(["defteam", "season"])["yds_allowed"]
         .apply(lambda s: s.shift(1).expanding().mean())
         .reset_index(level=[0, 1], drop=True)
@@ -752,13 +918,14 @@ def build_joint_outcome_table(pbp_df):
     questions like "in games where the QB threw 275+, what fraction had
     the combined game total over 24?"
 
-    Carries both team_total (this team's own score) and game_total
-    (home_score + away_score) on every row - callers must condition on
-    whichever one actually matches what they're comparing against, since
-    they're on very different scales.
+    Carries team_total (this team's own score), game_total (home_score +
+    away_score), qb_yards, top_wr_yards (leading receiver's yards that
+    game), and top_rb_yards (leading rusher's yards that game) on every
+    row - callers must condition on whichever field actually matches
+    what they're comparing against, since they're on different scales.
 
-    Returns a DataFrame: game_id, team, opponent, qb_yards, team_total,
-    game_total, opponent_qb_yards.
+    Returns a DataFrame: game_id, team, opponent, qb_yards, top_wr_yards,
+    top_rb_yards, team_total, game_total, opponent_qb_yards.
     """
     df = pbp_df[pbp_df.get("season_type") == "REG"].copy() if "season_type" in pbp_df.columns else pbp_df.copy()
 
@@ -766,6 +933,25 @@ def build_joint_outcome_table(pbp_df):
     pass_plays["passing_yards"] = pass_plays["passing_yards"].fillna(0)
     qb_by_game = pass_plays.groupby(["game_id", "posteam"])["passing_yards"].sum().reset_index()
     qb_lookup = qb_by_game.set_index(["game_id", "posteam"])["passing_yards"].to_dict()
+
+    rec_plays = df[df.get("complete_pass") == 1].dropna(subset=["receiver_id"]).copy() \
+        if "complete_pass" in df.columns else pd.DataFrame()
+    wr_lookup = {}
+    if not rec_plays.empty and "receiving_yards" in rec_plays.columns:
+        rec_plays["receiving_yards"] = rec_plays["receiving_yards"].fillna(0)
+        rec_by_player_game = rec_plays.groupby(["game_id", "posteam", "receiver"])["receiving_yards"].sum().reset_index()
+        top_wr_per_game = rec_by_player_game.sort_values("receiving_yards", ascending=False) \
+            .groupby(["game_id", "posteam"]).head(1)
+        wr_lookup = top_wr_per_game.set_index(["game_id", "posteam"])["receiving_yards"].to_dict()
+
+    rush_plays = df[df["rush_attempt"] == 1].dropna(subset=["rusher_id"]).copy() if "rush_attempt" in df.columns else pd.DataFrame()
+    rb_lookup = {}
+    if not rush_plays.empty and "rushing_yards" in rush_plays.columns:
+        rush_plays["rushing_yards"] = rush_plays["rushing_yards"].fillna(0)
+        rush_by_player_game = rush_plays.groupby(["game_id", "posteam", "rusher"])["rushing_yards"].sum().reset_index()
+        top_rb_per_game = rush_by_player_game.sort_values("rushing_yards", ascending=False) \
+            .groupby(["game_id", "posteam"]).head(1)
+        rb_lookup = top_rb_per_game.set_index(["game_id", "posteam"])["rushing_yards"].to_dict()
 
     scores = df.drop_duplicates(subset=["game_id"])[
         ["game_id", "home_team", "away_team", "home_score", "away_score"]
@@ -787,6 +973,8 @@ def build_joint_outcome_table(pbp_df):
                 "team": team,
                 "opponent": opp_team,
                 "qb_yards": qb_yards,
+                "top_wr_yards": wr_lookup.get((gid, team)),
+                "top_rb_yards": rb_lookup.get((gid, team)),
                 "team_total": team_score,
                 "game_total": game_total,
                 "opponent_qb_yards": qb_lookup.get((gid, opp_team)),
@@ -1152,5 +1340,33 @@ if __name__ == "__main__":
         run_topdown_vs_bottomup_matrix(team_games, bu_predictions, team_predictions_no_injury, team_total_std)
     else:
         print("WARNING: could not build the top-down/bottom-up comparison - skipping.")
+
+    print()
+    print("=" * 78)
+    print("WR / RB BACKTEST (skill vs naive baseline)")
+    print("=" * 78)
+    for stat_key, defense_field, label in (
+        ("receiving_yards", "rec_yds_allowed_pg", "WR"),
+        ("rushing_yards", "rush_yds_allowed_pg", "RB"),
+    ):
+        gamelog = build_walkforward_wr_rb_gamelog(pbp, stat_key)
+        defense_allowed = build_walkforward_defense_rec_rush_allowed(pbp, stat_key)
+        wr_rb_predictions = replay_wr_rb_props(gamelog, stat_key, defense_allowed, defense_field)
+        if not wr_rb_predictions:
+            print(f"{label}: no predictions generated - skipping.")
+            continue
+        wr_rb_df = pd.DataFrame(wr_rb_predictions)
+        wr_rb_brier, wr_rb_se, wr_rb_n = brier_with_se(wr_rb_df["hit"].values, wr_rb_df["predicted_prob"].values)
+        base_rate = float(wr_rb_df["hit"].mean())
+        naive_brier = base_rate * (1 - base_rate)
+        skill = naive_brier - wr_rb_brier
+        print(f"{label} Brier: {round(wr_rb_brier,4)} | SE: {round(wr_rb_se,4)} | n={wr_rb_n} | "
+              f"Naive baseline (base rate = {round(base_rate,3)}): {round(naive_brier,4)} | "
+              f"Skill: {'+' if skill>=0 else ''}{round(skill,4)}")
+        if skill < 0:
+            print(f"  WARNING: {label} skill is NEGATIVE - this prediction type should NOT ship "
+                  f"per the 'do not ship negative skill' constraint.")
+    print("=" * 78)
+    print()
 
     print("Backtest complete.")
