@@ -697,7 +697,13 @@ def team_total_over_prob(team_a_stats, team_b_stats, total_line, std_dev=None):
 def _fetch_with_retry(url, timeout=15):
     last_error = None
     for attempt in range(1, MAX_RETRIES + 1):
-        req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+        req = urllib.request.Request(url, headers={
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36",
+            "Accept": "application/json, text/plain, */*",
+            "Accept-Language": "en-US,en;q=0.9",
+            "Referer": "https://www.espn.com/nfl/scoreboard",
+            "Origin": "https://www.espn.com",
+        })
         try:
             with urllib.request.urlopen(req, timeout=timeout) as resp:
                 data = json.loads(resp.read().decode())
