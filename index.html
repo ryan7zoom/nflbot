@@ -230,35 +230,36 @@ function showTab(id, btn) {
 </head>
 <body>
 <h1>NFL Projections</h1>
-<p class="updated">Generated Mon Sep 14, 2026 20:56</p>
+<p class="updated">Generated Tue Sep 15, 2026 05:24</p>
 <p class="disclaimer">Projections, not guarantees. Verify lineups yourself.</p>
 
 <div class="tab-nav">
-  <button class="tab-card active" data-tab="tab-teamtotals" onclick="showTab('tab-teamtotals', this)">
-    <span class="tab-card-title">Team Totals</span>
-    <span class="tab-card-sub">Team and game score projections</span>
+  <button class="tab-card active" data-tab="tab-topqbs" onclick="showTab('tab-topqbs', this)">
+    <span class="tab-card-title">Player Projections</span>
+    <span class="tab-card-sub">Passing yards for each QB</span>
   </button>
   <button class="tab-card" data-tab="tab-clusters" onclick="showTab('tab-clusters', this)">
     <span class="tab-card-title">Combined Picks</span>
     <span class="tab-card-sub">Multiple projections in one game</span>
   </button>
-  <button class="tab-card" data-tab="tab-topqbs" onclick="showTab('tab-topqbs', this)">
-    <span class="tab-card-title">Player Projections</span>
-    <span class="tab-card-sub">Passing yards for each QB</span>
+  <button class="tab-card" data-tab="tab-teamtotals" onclick="showTab('tab-teamtotals', this)">
+    <span class="tab-card-title">Team Totals</span>
+    <span class="tab-card-sub">Team and game score projections</span>
   </button>
 </div>
 
-<div id="tab-teamtotals" class="tab-panel active">
-<p class="no-clusters">No games today.</p>
+<div id="tab-topqbs" class="tab-panel active">
+
+
 </div>
 
 <div id="tab-clusters" class="tab-panel">
 <p class="no-clusters">No correlated clusters clear the confidence bar today.</p>
 </div>
 
-<div id="tab-topqbs" class="tab-panel">
-
-
+<div id="tab-teamtotals" class="tab-panel">
+<p class="disclaimer" style="margin: 10px 20px;">Team scoring is hard to predict &mdash; these are shown for correlation use, not as standalone picks.</p>
+<p class="no-clusters">No games today.</p>
 </div>
 
 </body>
