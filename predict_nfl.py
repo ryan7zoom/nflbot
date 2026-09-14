@@ -720,7 +720,8 @@ def espn_site_get(path, params=None):
     url = f"{ESPN_SITE_BASE}{path}"
     if params:
         url += "?" + urllib.parse.urlencode(params)
-    return _fetch_with_retry(url)
+    proxied = "https://api.allorigins.win/raw?url=" + urllib.parse.quote(url, safe="")
+    return _fetch_with_retry(proxied)
 
 
 # ---------- schedule / today's games ----------
