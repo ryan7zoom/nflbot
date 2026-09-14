@@ -1158,11 +1158,14 @@ def build_qb_gamelogs(pbp_df, season=CURRENT_SEASON):
     return qb_logs
 
 
-def build_wr_rb_gamelogs(pbp_df):
+def build_wr_rb_gamelogs(pbp_df, season=CURRENT_SEASON):
     """
     Same idea for receivers (receiving_yards via receiver_id) and rushers
     (rushing_yards via rusher_id), for the secondary correlated-cluster
-    projections. Returns:
+    projections and the WR/RB prop tab. Names are reconciled against the
+    roster crosswalk (same fix as build_qb_gamelogs, since the same
+    stale-jersey-ID issue confirmed for QBs could affect any position
+    keyed the same way). Returns:
       {"receivers": {player_id: {...}}, "rushers": {player_id: {...}}}
     """
     if pbp_df.empty:
@@ -1172,28 +1175,37 @@ def build_wr_rb_gamelogs(pbp_df):
 
     rec = df[df.get("complete_pass") == 1].dropna(subset=["receiver_id"]).copy() \
         if "complete_pass" in df.columns else df.dropna(subset=["receiver_id"]).copy()
+    has_rec_jersey = "receiver_jersey_number" in rec.columns
     if "receiving_yards" in rec.columns:
         rec["receiving_yards"] = rec["receiving_yards"].fillna(0.0)
-        rec_grouped = rec.groupby(["receiver_id", "receiver", "posteam", "game_id", "week"]).agg(
-            receiving_yards=("receiving_yards", "sum"),
-        ).reset_index()
+        agg_dict = {"receiving_yards": ("receiving_yards", "sum")}
+        group_cols = ["receiver_id", "receiver", "posteam", "game_id", "week"]
+        if has_rec_jersey:
+            agg_dict["jersey_number"] = ("receiver_jersey_number", "first")
+        rec_grouped = rec.groupby(group_cols).agg(**agg_dict).reset_index()
     else:
         rec_grouped = pd.DataFrame()
 
     rush = df[df["rush_attempt"] == 1].dropna(subset=["rusher_id"]).copy() if "rush_attempt" in df.columns else pd.DataFrame()
+    has_rush_jersey = "rusher_jersey_number" in rush.columns if not rush.empty else False
     if not rush.empty and "rushing_yards" in rush.columns:
         rush["rushing_yards"] = rush["rushing_yards"].fillna(0.0)
-        rush_grouped = rush.groupby(["rusher_id", "rusher", "posteam", "game_id", "week"]).agg(
-            rushing_yards=("rushing_yards", "sum"),
-        ).reset_index()
+        agg_dict = {"rushing_yards": ("rushing_yards", "sum")}
+        group_cols = ["rusher_id", "rusher", "posteam", "game_id", "week"]
+        if has_rush_jersey:
+            agg_dict["jersey_number"] = ("rusher_jersey_number", "first")
+        rush_grouped = rush.groupby(group_cols).agg(**agg_dict).reset_index()
     else:
         rush_grouped = pd.DataFrame()
 
     receivers = {}
     for _, row in rec_grouped.iterrows():
         pid = row["receiver_id"]
+        team = row["posteam"]
+        jersey = row["jersey_number"] if has_rec_jersey else None
+        resolved_name = reconcile_player_name(row["receiver"], team, jersey, season)
         if pid not in receivers:
-            receivers[pid] = {"name": row["receiver"], "team": row["posteam"], "games": []}
+            receivers[pid] = {"name": resolved_name, "team": team, "games": []}
         receivers[pid]["games"].append({
             "week": row["week"], "game_id": row["game_id"],
             "receiving_yards": float(row["receiving_yards"]),
@@ -1204,8 +1216,11 @@ def build_wr_rb_gamelogs(pbp_df):
     rushers = {}
     for _, row in rush_grouped.iterrows():
         pid = row["rusher_id"]
+        team = row["posteam"]
+        jersey = row["jersey_number"] if has_rush_jersey else None
+        resolved_name = reconcile_player_name(row["rusher"], team, jersey, season)
         if pid not in rushers:
-            rushers[pid] = {"name": row["rusher"], "team": row["posteam"], "games": []}
+            rushers[pid] = {"name": resolved_name, "team": team, "games": []}
         rushers[pid]["games"].append({
             "week": row["week"], "game_id": row["game_id"],
             "rushing_yards": float(row["rushing_yards"]),
@@ -1248,6 +1263,62 @@ def build_defense_yards_allowed(pbp_df):
         result[row["defteam"]] = {
             "pass_yds_allowed_pg": round(float(row["pass_yds_allowed_pg"]), 1),
             "games": int(row["games"]),
+        }
+    return result
+
+
+def build_defense_receiving_rushing_allowed(pbp_df):
+    """
+    Same pattern as build_defense_yards_allowed, for receiving yards and
+    rushing yards allowed per game - used for the WR/RB opponent
+    adjustment, the same way pass_yds_allowed_pg is used for QBs.
+    Returns { nflverse_team_abbr: {"rec_yds_allowed_pg": float,
+    "rush_yds_allowed_pg": float, "games": int} }
+    """
+    if pbp_df.empty:
+        return {}
+
+    df = pbp_df[pbp_df.get("season_type") == "REG"].copy() if "season_type" in pbp_df.columns else pbp_df.copy()
+
+    rec_plays = df[df.get("complete_pass") == 1].dropna(subset=["defteam"]).copy() \
+        if "complete_pass" in df.columns else pd.DataFrame()
+    if not rec_plays.empty and "receiving_yards" in rec_plays.columns:
+        rec_plays["receiving_yards"] = rec_plays["receiving_yards"].fillna(0.0)
+        rec_per_game = rec_plays.groupby(["defteam", "game_id"]).agg(
+            yds_allowed=("receiving_yards", "sum"),
+        ).reset_index()
+        rec_per_team = rec_per_game.groupby("defteam").agg(
+            rec_yds_allowed_pg=("yds_allowed", "mean"),
+            rec_games=("game_id", "nunique"),
+        ).reset_index()
+    else:
+        rec_per_team = pd.DataFrame()
+
+    rush_plays = df[df["rush_attempt"] == 1].dropna(subset=["defteam"]).copy() if "rush_attempt" in df.columns else pd.DataFrame()
+    if not rush_plays.empty and "rushing_yards" in rush_plays.columns:
+        rush_plays["rushing_yards"] = rush_plays["rushing_yards"].fillna(0.0)
+        rush_per_game = rush_plays.groupby(["defteam", "game_id"]).agg(
+            yds_allowed=("rushing_yards", "sum"),
+        ).reset_index()
+        rush_per_team = rush_per_game.groupby("defteam").agg(
+            rush_yds_allowed_pg=("yds_allowed", "mean"),
+            rush_games=("game_id", "nunique"),
+        ).reset_index()
+    else:
+        rush_per_team = pd.DataFrame()
+
+    result = {}
+    all_teams = set(rec_per_team["defteam"]) if not rec_per_team.empty else set()
+    all_teams |= set(rush_per_team["defteam"]) if not rush_per_team.empty else set()
+    rec_lookup = rec_per_team.set_index("defteam").to_dict("index") if not rec_per_team.empty else {}
+    rush_lookup = rush_per_team.set_index("defteam").to_dict("index") if not rush_per_team.empty else {}
+    for team in all_teams:
+        rec_info = rec_lookup.get(team, {})
+        rush_info = rush_lookup.get(team, {})
+        result[team] = {
+            "rec_yds_allowed_pg": round(float(rec_info["rec_yds_allowed_pg"]), 1) if rec_info else None,
+            "rush_yds_allowed_pg": round(float(rush_info["rush_yds_allowed_pg"]), 1) if rush_info else None,
+            "games": int(rec_info.get("rec_games") or rush_info.get("rush_games") or 0),
         }
     return result
 
@@ -1564,6 +1635,78 @@ def get_qb_props(team_abbr, opponent_espn_abbr, qb_gamelogs,
     }
 
 
+def get_wr_rb_props(player, stat_key, opponent_nflverse_abbr, season=CURRENT_SEASON):
+    """
+    Same layering as get_qb_props, adapted for a single WR/RB player:
+    raw empirical hit-rates -> Bayesian-shrunk -> opponent-adjusted using
+    receiving/rushing yards allowed. No attempts-rescaling (that's QB-
+    specific volume logic tied to pass_attempts) and no usage boost (a
+    WR/RB doesn't boost itself when a teammate is out - that's the QB's
+    usage_boost_if_starter_out path).
+
+    player is one entry from find_ranked_wr_rb's output:
+    {"pid":..., "name":..., "games": [...]}. stat_key is "receiving_yards"
+    or "rushing_yards". Returns None if there's no usable game sample.
+    """
+    recent_games = player["games"][-QB_GAMES_SAMPLE:]
+    if not recent_games:
+        return None
+
+    raw_floors = prop_floor_probs_wr_rb(recent_games, stat_key)
+    if not raw_floors:
+        return None
+
+    avg_yards = round(sum(g.get(stat_key, 0.0) or 0.0 for g in recent_games) / len(recent_games), 1)
+    games_sampled = len(recent_games)
+
+    return {
+        "pid": player["pid"],
+        "name": player["name"],
+        "opponent_espn_abbr": opponent_nflverse_abbr,
+        "games_sampled": games_sampled,
+        "avg_yards": avg_yards,
+        "stat_key": stat_key,
+        "confidence_interval": compute_confidence_interval(
+            [{"passing_yards": g.get(stat_key, 0.0)} for g in recent_games], avg_yards
+        ),
+        "raw_floors": {stat_key: raw_floors},
+        "_adjusted_floors_pending": {
+            t: {"raw_hit_rate": hr, "hits": round(hr * games_sampled), "games": games_sampled}
+            for t, hr in raw_floors.items()
+        },
+    }
+
+
+def finalize_wr_rb_floors(props, league_avg_hit_rate, opponent_nflverse_abbr, defense_rec_rush_allowed):
+    """
+    Second pass for WR/RB props: Bayesian shrinkage, then opponent
+    adjustment using receiving/rushing yards allowed (the WR/RB
+    equivalent of finalize_qb_floors' pass_yds_allowed_pg path). Same
+    pct-diff formula, same +/-15% cap.
+    """
+    stat_key = props["stat_key"]
+    field = "rec_yds_allowed_pg" if stat_key == "receiving_yards" else "rush_yds_allowed_pg"
+    floors = {}
+
+    opp_stats = defense_rec_rush_allowed.get(opponent_nflverse_abbr, {}) if defense_rec_rush_allowed else {}
+    vals = [v.get(field) for v in defense_rec_rush_allowed.values() if v.get(field) is not None] \
+        if defense_rec_rush_allowed else []
+    league_avg_allowed = sum(vals) / len(vals) if vals else None
+
+    for threshold, info in props["_adjusted_floors_pending"].items():
+        shrunk = bayesian_shrinkage(info["hits"], info["games"], league_avg_hit_rate)
+        adjusted = shrunk
+        if opp_stats.get(field) is not None and league_avg_allowed:
+            pct_diff = (opp_stats[field] - league_avg_allowed) / league_avg_allowed
+            adj_factor = max(-0.15, min(0.15, 0.4 * pct_diff))
+            adjusted = max(0.0, min(1.0, shrunk * (1 + adj_factor)))
+        floors[threshold] = round(adjusted, 3)
+
+    props["floors"] = {stat_key: floors}
+    del props["_adjusted_floors_pending"]
+    return props
+
+
 def finalize_qb_floors(qb_props, league_avg_hit_rate, opponent_nflverse_abbr, defense_yards_allowed):
     """
     Applies Bayesian shrinkage, then the opponent adjustment, then the
@@ -1693,9 +1836,10 @@ def build_report():
 
     pbp_df, pbp_season_used = load_pbp_with_fallback()
     qb_gamelogs = build_qb_gamelogs(pbp_df, season=pbp_season_used) if pbp_season_used else {}
-    wr_rb_logs = build_wr_rb_gamelogs(pbp_df) if pbp_season_used else {"receivers": {}, "rushers": {}}
+    wr_rb_logs = build_wr_rb_gamelogs(pbp_df, season=pbp_season_used) if pbp_season_used else {"receivers": {}, "rushers": {}}
     defense_yards_allowed = build_defense_yards_allowed(pbp_df) if pbp_season_used else {}
     defense_pass_epa = build_defense_pass_epa(pbp_df) if pbp_season_used else {}
+    defense_rec_rush_allowed = build_defense_receiving_rushing_allowed(pbp_df) if pbp_season_used else {}
     # merge EPA into the same per-team dict opponent_adjustment() reads from
     for team, epa_stats in defense_pass_epa.items():
         defense_yards_allowed.setdefault(team, {}).update(epa_stats)
@@ -1777,6 +1921,55 @@ def build_report():
         finalized = finalize_qb_floors(props, league_avg_hr, opp_nflverse_abbr, defense_yards_allowed)
         finalized = attach_main_line_and_under(finalized)
         finalized_qb_props_by_team[team_nflverse_abbr] = finalized
+
+    # ---- WR/RB props: same two-pass structure as QB (raw, then league
+    # average, then shrink+adjust), computed once for every team appearing
+    # today, keyed by (team, stat_key) -> list of finalized player props.
+    raw_wr_rb_by_team = {}
+    for g in games:
+        for side, opp_side in (("home", "away"), ("away", "home")):
+            team_espn_abbr = g[f"{side}_team_abbr"]
+            opp_espn_abbr = g[f"{opp_side}_team_abbr"]
+            team_nflverse_abbr = to_nflverse_abbr(team_espn_abbr)
+            if team_nflverse_abbr in raw_wr_rb_by_team:
+                continue
+            wr_ranked, rb_ranked = find_ranked_wr_rb(team_nflverse_abbr, wr_rb_logs)
+            entries = []
+            for wr in wr_ranked:
+                p = get_wr_rb_props(wr, "receiving_yards", to_nflverse_abbr(opp_espn_abbr), season=pbp_season_used or CURRENT_SEASON)
+                if p:
+                    entries.append(("wr", p))
+            for rb in rb_ranked:
+                p = get_wr_rb_props(rb, "rushing_yards", to_nflverse_abbr(opp_espn_abbr), season=pbp_season_used or CURRENT_SEASON)
+                if p:
+                    entries.append(("rb", p))
+            raw_wr_rb_by_team[team_nflverse_abbr] = entries
+
+    def _league_avg_for(stat_key):
+        candidates = []
+        for entries in raw_wr_rb_by_team.values():
+            for role, p in entries:
+                if p["stat_key"] == stat_key:
+                    candidates.append({
+                        "floors": {stat_key: {t: info["raw_hit_rate"] for t, info in p["_adjusted_floors_pending"].items()}},
+                        "games_sampled": p["games_sampled"],
+                    })
+        return compute_league_avg_hit_rate(candidates, stat_key=stat_key)
+
+    league_avg_rec = _league_avg_for("receiving_yards")
+    league_avg_rush = _league_avg_for("rushing_yards")
+    print(f"League average shrinkage target (receiving_yards): {league_avg_rec:.3f}")
+    print(f"League average shrinkage target (rushing_yards): {league_avg_rush:.3f}")
+
+    finalized_wr_rb_by_team = {}
+    for team_nflverse_abbr, entries in raw_wr_rb_by_team.items():
+        finalized_entries = []
+        for role, p in entries:
+            opp_nflverse_abbr = p["opponent_espn_abbr"]
+            league_avg = league_avg_rec if p["stat_key"] == "receiving_yards" else league_avg_rush
+            finalized_p = finalize_wr_rb_floors(p, league_avg, opp_nflverse_abbr, defense_rec_rush_allowed)
+            finalized_entries.append((role, finalized_p))
+        finalized_wr_rb_by_team[team_nflverse_abbr] = finalized_entries
 
     # ---- team points-for/against via ESPN schedule (cached) ----
     report = []
@@ -1878,6 +2071,13 @@ def build_report():
         home_qb = finalized_qb_props_by_team.get(home_nflverse)
         away_qb = finalized_qb_props_by_team.get(away_nflverse)
 
+        home_wr_rb = finalized_wr_rb_by_team.get(home_nflverse, [])
+        away_wr_rb = finalized_wr_rb_by_team.get(away_nflverse, [])
+        home_wrs = [p for role, p in home_wr_rb if role == "wr"]
+        home_rbs = [p for role, p in home_wr_rb if role == "rb"]
+        away_wrs = [p for role, p in away_wr_rb if role == "wr"]
+        away_rbs = [p for role, p in away_wr_rb if role == "rb"]
+
         if weather_info and weather_mult < 1.0:
             for qb in (home_qb, away_qb):
                 if not qb:
@@ -1938,6 +2138,10 @@ def build_report():
             "game_total_over_prob": game_total_prob,
             "home_qb": home_qb,
             "away_qb": away_qb,
+            "home_wrs": home_wrs,
+            "away_wrs": away_wrs,
+            "home_rbs": home_rbs,
+            "away_rbs": away_rbs,
             "home_injury_flags": injury_flags_by_team.get(g["home_team_abbr"], []),
             "away_injury_flags": injury_flags_by_team.get(g["away_team_abbr"], []),
             "weather_note": weather_note,
@@ -2036,6 +2240,50 @@ def query_joint_probability(joint_df, qb_threshold, total_threshold, min_samples
     }
 
 
+def query_joint_probability_multi(joint_df, condition_field, condition_threshold, target_field, target_threshold,
+                                   min_samples=20, condition_comparison=">=", target_comparison=">"):
+    """
+    Generalization of query_joint_probability: answers "in historical
+    rows where condition_field {condition_comparison} condition_threshold,
+    what fraction also had target_field {target_comparison} target_threshold?"
+
+    Does not replace query_joint_probability (kept intact, still used for
+    the QB+total pairing) - this is for the newer pairings (QB+WR1,
+    RB+total, QB-vs-opponent-QB) where the condition and target aren't
+    always "qb_yards" and a fixed total field.
+
+    Valid fields: qb_yards, top_wr_yards, top_rb_yards, team_total,
+    game_total, opponent_qb_yards.
+
+    Returns {"joint_prob", "n", "unconditional_prob"} or None if the
+    field is missing from the table or the sample is too thin.
+    """
+    if joint_df is None or joint_df.empty:
+        return None
+    valid_fields = {"qb_yards", "top_wr_yards", "top_rb_yards", "team_total", "game_total", "opponent_qb_yards"}
+    if condition_field not in valid_fields or target_field not in valid_fields:
+        raise ValueError(f"fields must be one of {valid_fields}")
+    if condition_field not in joint_df.columns or target_field not in joint_df.columns:
+        return None  # older cached CSV missing this column - fail closed
+
+    df = joint_df.dropna(subset=[condition_field, target_field])
+    ops = {">=": lambda s, t: s >= t, ">": lambda s, t: s > t, "<": lambda s, t: s < t, "<=": lambda s, t: s <= t}
+    cond_op = ops[condition_comparison]
+    targ_op = ops[target_comparison]
+
+    subset = df[cond_op(df[condition_field], condition_threshold)]
+    n = len(subset)
+    if n < min_samples:
+        return None
+    joint_prob = targ_op(subset[target_field], target_threshold).mean()
+    unconditional_prob = targ_op(df[target_field], target_threshold).mean()
+    return {
+        "joint_prob": round(float(joint_prob), 3),
+        "n": int(n),
+        "unconditional_prob": round(float(unconditional_prob), 3),
+    }
+
+
 def extract_correlated_forecasts(report, min_confidence=CONFIDENCE_THRESHOLD, limit=8):
     """
     Groups projections by game. A cluster requires at least 2 correlated
@@ -2127,6 +2375,115 @@ def extract_correlated_forecasts(report, min_confidence=CONFIDENCE_THRESHOLD, li
         if total_leg_replaced:
             pieces = [p for p in pieces if p.get("type") != "total"]
 
+        # Three additional correlated pairs, per spec: QB+WR1,
+        # RB+team-total, and the shootout (both QBs). Each adds a joint
+        # piece if the sample is large enough (>=20), else a visible
+        # fallback note - never silently drops the correlation question.
+        for side_key, team_abbr_qb, opp_team_abbr in (
+            ("home_qb", g["home_team_abbr"], g["away_team_abbr"]),
+            ("away_qb", g["away_team_abbr"], g["home_team_abbr"]),
+        ):
+            qb = g.get(side_key)
+            if not qb:
+                continue
+            qb_line = best_bettable_line(qb, min_confidence)
+            if not qb_line:
+                continue
+
+            # QB + WR1 (same team)
+            wrs_key = "home_wrs" if side_key == "home_qb" else "away_wrs"
+            wrs = g.get(wrs_key) or []
+            if wrs:
+                wr1 = wrs[0]
+                wr1_line_info = best_bettable_line(
+                    {"floors": wr1.get("floors", {}), "avg_passing_yards": wr1.get("avg_yards")},
+                    min_confidence,
+                ) if wr1.get("floors", {}).get("receiving_yards") else None
+                # best_bettable_line expects passing_yards-shaped floors;
+                # WR floors are keyed by receiving_yards, so pick a
+                # representative threshold directly instead of reusing
+                # that helper's passing-yards-specific key lookup.
+                wr_floors = wr1.get("floors", {}).get("receiving_yards", {})
+                wr_threshold = medium_threshold_for(wr_floors, avg_yards=wr1.get("avg_yards")) if wr_floors else None
+                if wr_threshold is not None:
+                    joint_result = query_joint_probability_multi(
+                        joint_df, "qb_yards", qb_line["threshold"], "top_wr_yards", wr_threshold
+                    )
+                    if joint_result:
+                        pieces.append({
+                            "type": "joint_qb_wr1",
+                            "label": (f"{team_abbr_qb}: {qb['name']} {qb_line['threshold']}+ passing yards AND "
+                                      f"{wr1['name']} {wr_threshold}+ receiving yards together \u2014 historically "
+                                      f"{round(joint_result['joint_prob']*100)}% of the time (n={joint_result['n']}, "
+                                      f"vs {round(joint_result['unconditional_prob']*100)}% baseline)"),
+                            "prob": joint_result["joint_prob"],
+                            "_is_joint": True,
+                        })
+                    else:
+                        pieces.append({
+                            "type": "joint_qb_wr1_unavailable",
+                            "label": (f"{team_abbr_qb}: {qb['name']} passing yards + {wr1['name']} receiving yards \u2014 "
+                                      f"not enough historical samples for a joint estimate at these thresholds."),
+                            "prob": None,
+                        })
+
+            # RB + team total (same team)
+            rbs_key = "home_rbs" if side_key == "home_qb" else "away_rbs"
+            rbs = g.get(rbs_key) or []
+            team_total = g.get("home_team_total") if side_key == "home_qb" else g.get("away_team_total")
+            team_total_line = round(g["total_line"] / 2, 1) if g.get("total_line") is not None else None
+            if rbs and team_total_line is not None:
+                rb1 = rbs[0]
+                rb_floors = rb1.get("floors", {}).get("rushing_yards", {})
+                rb_threshold = medium_threshold_for(rb_floors, avg_yards=rb1.get("avg_yards")) if rb_floors else None
+                if rb_threshold is not None:
+                    joint_result = query_joint_probability_multi(
+                        joint_df, "top_rb_yards", rb_threshold, "team_total", team_total_line
+                    )
+                    if joint_result:
+                        pieces.append({
+                            "type": "joint_rb_team_total",
+                            "label": (f"{team_abbr_qb}: {rb1['name']} {rb_threshold}+ rushing yards AND team total OVER "
+                                      f"{team_total_line} together \u2014 historically {round(joint_result['joint_prob']*100)}% "
+                                      f"of the time (n={joint_result['n']}, vs {round(joint_result['unconditional_prob']*100)}% baseline)"),
+                            "prob": joint_result["joint_prob"],
+                            "_is_joint": True,
+                        })
+                    else:
+                        pieces.append({
+                            "type": "joint_rb_team_total_unavailable",
+                            "label": (f"{team_abbr_qb}: {rb1['name']} rushing yards + team total \u2014 "
+                                      f"not enough historical samples for a joint estimate at these thresholds."),
+                            "prob": None,
+                        })
+
+        # Shootout: both QBs over their own lines together
+        home_qb, away_qb = g.get("home_qb"), g.get("away_qb")
+        if home_qb and away_qb:
+            home_line = best_bettable_line(home_qb, min_confidence)
+            away_line = best_bettable_line(away_qb, min_confidence)
+            if home_line and away_line:
+                joint_result = query_joint_probability_multi(
+                    joint_df, "qb_yards", home_line["threshold"], "opponent_qb_yards", away_line["threshold"]
+                )
+                if joint_result:
+                    pieces.append({
+                        "type": "joint_shootout",
+                        "label": (f"Shootout: {home_qb['name']} {home_line['threshold']}+ AND {away_qb['name']} "
+                                  f"{away_line['threshold']}+ passing yards together \u2014 historically "
+                                  f"{round(joint_result['joint_prob']*100)}% of the time (n={joint_result['n']}, "
+                                  f"vs {round(joint_result['unconditional_prob']*100)}% baseline)"),
+                        "prob": joint_result["joint_prob"],
+                        "_is_joint": True,
+                    })
+                else:
+                    pieces.append({
+                        "type": "joint_shootout_unavailable",
+                        "label": (f"Shootout: {home_qb['name']} + {away_qb['name']} passing yards \u2014 "
+                                  f"not enough historical samples for a joint estimate at these thresholds."),
+                        "prob": None,
+                    })
+
         # strip internal-only markers before returning - _side_key was
         # only needed to build the joint-probability lookups above, and
         # _is_joint was never actually read by any renderer (verified: no
@@ -2137,13 +2494,19 @@ def extract_correlated_forecasts(report, min_confidence=CONFIDENCE_THRESHOLD, li
             p.pop("_side_key", None)
             p.pop("_is_joint", None)
 
-        if len(pieces) >= 2:
-            pieces.sort(key=lambda x: x["prob"], reverse=True)
-            avg_conf = sum(p["prob"] for p in pieces) / len(pieces)
+        # "unavailable" fallback notes have prob=None by design (no joint
+        # estimate exists) - they display, but don't count toward
+        # avg_confidence or affect the probability sort.
+        scored_pieces = [p for p in pieces if p["prob"] is not None]
+        unavailable_pieces = [p for p in pieces if p["prob"] is None]
+
+        if len(scored_pieces) >= 2:
+            scored_pieces.sort(key=lambda x: x["prob"], reverse=True)
+            avg_conf = sum(p["prob"] for p in scored_pieces) / len(scored_pieces)
             clusters.append({
                 "game_label": game_label,
                 "kickoff_local": g["kickoff_local"],
-                "pieces": pieces,
+                "pieces": scored_pieces + unavailable_pieces,
                 "avg_confidence": round(avg_conf, 3),
             })
 
@@ -2241,6 +2604,32 @@ def _render_qb_passing_projections(qb, side_label):
     </div>"""
 
 
+def _render_wr_rb_projections(players, label_prefix):
+    if not players:
+        return ""
+    blocks = []
+    for player in players:
+        stat_key = player["stat_key"]
+        floors = player.get("floors", {}).get(stat_key, {})
+        if not floors:
+            continue
+        pills = []
+        for threshold in sorted(floors.keys()):
+            prob = floors[threshold]
+            pct = round(prob * 100) if prob is not None else None
+            pill_cls = _pill_class(prob)
+            pct_display = f"{pct}%" if pct is not None else "N/A"
+            stat_label = "rec yds" if stat_key == "receiving_yards" else "rush yds"
+            pills.append(f'<span class="pill {pill_cls}">{threshold}+ {stat_label}: {pct_display}</span>')
+        blocks.append(f"""
+    <div class="qb-block">
+      <p class="qb-name">{label_prefix}: {player['name']}</p>
+      <p class="qb-games">last {player['games_sampled']} games sampled</p>
+      <div class="pill-row">{''.join(pills)}</div>
+    </div>""")
+    return "".join(blocks)
+
+
 def _render_game_card(g):
     home_bar = _prob_bar_html(g.get("home_cover_prob"),
                                f"{g['home_team_abbr']} covers {g['spread_line']}" if g.get("spread_line") is not None else "Spread")
@@ -2249,6 +2638,10 @@ def _render_game_card(g):
 
     home_qb_html = _render_qb_passing_projections(g.get("home_qb"), g["home_team_abbr"])
     away_qb_html = _render_qb_passing_projections(g.get("away_qb"), g["away_team_abbr"])
+    home_wr_rb_html = (_render_wr_rb_projections(g.get("home_wrs"), f"{g['home_team_abbr']} WR")
+                        + _render_wr_rb_projections(g.get("home_rbs"), f"{g['home_team_abbr']} RB"))
+    away_wr_rb_html = (_render_wr_rb_projections(g.get("away_wrs"), f"{g['away_team_abbr']} WR")
+                        + _render_wr_rb_projections(g.get("away_rbs"), f"{g['away_team_abbr']} RB"))
 
     all_flags = (g.get("home_injury_flags") or []) + (g.get("away_injury_flags") or [])
     flags_html = ""
@@ -2277,7 +2670,9 @@ def _render_game_card(g):
         <div class="qb-projections-section">
           <h3 class="section-subheading">Player Projections</h3>
           {home_qb_html}
+          {home_wr_rb_html}
           {away_qb_html}
+          {away_wr_rb_html}
         </div>
       </div>
     </div>"""
@@ -2324,6 +2719,8 @@ def _render_correlated_clusters(clusters):
     for c in clusters:
         piece_html = "".join(
             f'<li><span class="pill {_pill_class(p["prob"])}">{p["label"]}: {round(p["prob"]*100)}%</span></li>'
+            if p["prob"] is not None
+            else f'<li><span class="pill pill-cool">{p["label"]}</span></li>'
             for p in c["pieces"]
         )
         items.append(f"""
@@ -2625,31 +3022,32 @@ function showTab(id, btn) {{
 <p class="disclaimer">Projections, not guarantees. Verify lineups yourself.</p>
 
 <div class="tab-nav">
-  <button class="tab-card active" data-tab="tab-teamtotals" onclick="showTab('tab-teamtotals', this)">
-    <span class="tab-card-title">Team Totals</span>
-    <span class="tab-card-sub">Team and game score projections</span>
+  <button class="tab-card active" data-tab="tab-topqbs" onclick="showTab('tab-topqbs', this)">
+    <span class="tab-card-title">Player Projections</span>
+    <span class="tab-card-sub">Passing yards for each QB</span>
   </button>
   <button class="tab-card" data-tab="tab-clusters" onclick="showTab('tab-clusters', this)">
     <span class="tab-card-title">Combined Picks</span>
     <span class="tab-card-sub">Multiple projections in one game</span>
   </button>
-  <button class="tab-card" data-tab="tab-topqbs" onclick="showTab('tab-topqbs', this)">
-    <span class="tab-card-title">Player Projections</span>
-    <span class="tab-card-sub">Passing yards for each QB</span>
+  <button class="tab-card" data-tab="tab-teamtotals" onclick="showTab('tab-teamtotals', this)">
+    <span class="tab-card-title">Team Totals</span>
+    <span class="tab-card-sub">Team and game score projections</span>
   </button>
 </div>
 
-<div id="tab-teamtotals" class="tab-panel active">
-{team_totals_tab}
+<div id="tab-topqbs" class="tab-panel active">
+{_render_top_qb_performers(top_qbs)}
+{''.join(game_cards)}
 </div>
 
 <div id="tab-clusters" class="tab-panel">
 {_render_correlated_clusters(clusters)}
 </div>
 
-<div id="tab-topqbs" class="tab-panel">
-{_render_top_qb_performers(top_qbs)}
-{''.join(game_cards)}
+<div id="tab-teamtotals" class="tab-panel">
+<p class="disclaimer" style="margin: 10px 20px;">Team scoring is hard to predict &mdash; these are shown for correlation use, not as standalone picks.</p>
+{team_totals_tab}
 </div>
 
 </body>
@@ -2838,19 +3236,33 @@ def find_wr1_rb1(team_abbr, wr_rb_logs, min_games=3):
     since there's no separate 'depth chart rank' field wired in yet.
     Returns (wr1_name, rb1_name), either of which may be None.
     """
-    def _top(logs_dict, yard_key):
+    wr_ranked, rb_ranked = find_ranked_wr_rb(team_abbr, wr_rb_logs, min_games=min_games)
+    wr1 = wr_ranked[0]["name"] if wr_ranked else None
+    rb1 = rb_ranked[0]["name"] if rb_ranked else None
+    return wr1, rb1
+
+
+def find_ranked_wr_rb(team_abbr, wr_rb_logs, min_games=3, top_wr=2, top_rb=1):
+    """
+    Ranked lists of a team's top receivers/rushers by season total yards -
+    same proxy logic as find_wr1_rb1, generalized to return more than
+    just the single top player at each position. Returns
+    ([{"pid":..., "name":..., "games": [...]}], [...]) for
+    (receivers, rushers), each sorted highest-yardage first, truncated to
+    top_wr / top_rb entries.
+    """
+    def _ranked(logs_dict, yard_key, top_n):
         candidates = [
-            (data["name"], sum(g[yard_key] for g in data["games"]))
+            (pid, data["name"], data["games"], sum(g[yard_key] for g in data["games"]))
             for pid, data in logs_dict.items()
             if data["team"] == team_abbr and len(data["games"]) >= min_games
         ]
-        if not candidates:
-            return None
-        return max(candidates, key=lambda x: x[1])[0]
+        candidates.sort(key=lambda x: x[3], reverse=True)
+        return [{"pid": pid, "name": name, "games": games} for pid, name, games, _ in candidates[:top_n]]
 
-    wr1 = _top(wr_rb_logs.get("receivers", {}), "receiving_yards")
-    rb1 = _top(wr_rb_logs.get("rushers", {}), "rushing_yards")
-    return wr1, rb1
+    wr_ranked = _ranked(wr_rb_logs.get("receivers", {}), "receiving_yards", top_wr)
+    rb_ranked = _ranked(wr_rb_logs.get("rushers", {}), "rushing_yards", top_rb)
+    return wr_ranked, rb_ranked
 
 
 # Empirical usage boost: WR1/RB1-out multipliers, fit from history when
